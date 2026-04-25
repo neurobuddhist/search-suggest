@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Search Suggest Lab</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main class="app">
+    <header class="topbar">
+      <div>
+        <h1>Проект для попадания в Avito search suggest team</h1>
+        <p>In-memory autocomplete engines</p>
+      </div>
+    </header>
+
+    <section class="search-panel" aria-label="Search suggestions">
+      <div class="search-row">
+        <label class="search-label" for="search">Query</label>
+        <input id="search" type="search" autocomplete="off" spellcheck="false" placeholder="Try go, trie, search, pizza">
+      </div>
+
+      <div class="controls">
+        <label>
+          Engine
+          <select id="engine"></select>
+        </label>
+        <label>
+          K
+          <input id="k" type="range" min="1" max="15" value="8">
+          <span id="k-value">8</span>
+        </label>
+      </div>
+    </section>
+
+    <section class="results-panel" aria-label="Suggestions">
+      <div class="results-head">
+        <span>Suggestion</span>
+        <span>Score</span>
+      </div>
+      <ol id="results" class="results"></ol>
+      <p id="empty" class="empty" hidden>No suggestions</p>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>
