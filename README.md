@@ -3,6 +3,7 @@
 Учебно-исследовательский проект про autocomplete/search suggest: сравнение простых in-memory подходов и trie с cached top-k suggestions на Go.
 
 Демо: https://drive.google.com/file/d/1zzHqXWR5OSWWdI7yhZ8xXjs1rxLQ2h52/view?usp=sharing
+0:53 оговорка, не все префиксы, а всех кандидатов для префикса пользователя
 
 ## Заметки автора
 
