@@ -56,6 +56,46 @@ func TestEnginesAgree(t *testing.T) {
 	}
 }
 
+func TestEnginesNormalizeRankAndDedupe(t *testing.T) {
+	items := []Item{
+		{Text: " Go ", Score: 10},
+		{Text: "go", Score: 20},
+		{Text: "GO", Score: 15},
+		{Text: "go docs", Score: 30},
+		{Text: "go delve", Score: 30},
+		{Text: "gopher", Score: 5},
+	}
+	want := []Item{
+		{Text: "go delve", Score: 30},
+		{Text: "go docs", Score: 30},
+		{Text: "go", Score: 20},
+	}
+
+	for _, factory := range allFactories() {
+		engine := factory.build(items)
+		got := engine.Suggest(" GO ", 3)
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s:\n got: %#v\nwant: %#v", engine.Name(), got, want)
+		}
+	}
+}
+
+func TestRankedTrieFallsBackWhenKExceedsCache(t *testing.T) {
+	items := []Item{
+		{Text: "go one", Score: 10},
+		{Text: "go two", Score: 20},
+		{Text: "go three", Score: 30},
+		{Text: "go four", Score: 40},
+	}
+
+	engine := NewRankedTrie(items, 2)
+	got := engine.Suggest("go", 4)
+	want := rankItems(items, 4)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got: %#v\nwant: %#v", got, want)
+	}
+}
+
 func TestRetainedHeapComparison(t *testing.T) {
 	if os.Getenv("SUGGEST_PRINT_RETAINED") != "1" {
 		t.Skip("set SUGGEST_PRINT_RETAINED=1 to print retained heap table")

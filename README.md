@@ -1,8 +1,21 @@
-# Search Suggest Lab
+# In-memory Search Suggest Engines in Go
 
-Мини pet project про in-memory autocomplete на Go.
+Учебно-исследовательский проект про autocomplete/search suggest: сравнение простых in-memory подходов и trie с cached top-k suggestions на Go.
 
-Главный тезис: search suggest - это не просто prefix lookup. Обычный trie/radix отвечает на вопрос "какие строки имеют prefix?", а suggest отвечает на вопрос "какие top-k строк с этим prefix нужно вернуть прямо сейчас?".
+## Заметки автора.
+
+> [!NOTE]
+> Проект сделан как исследование Backend + IR: как базовые структуры данных ведут себя в задаче autocomplete/search suggest.
+> 
+> Сравниваются базовые подходы автодополнения: linear scan, sorted array, generic trie/radix и top-k-aware trie.
+> 
+> Целей заменить Lucene/ElasticSearch/Manticore не стояло, я просто исследовал простые подходы в search suggestion.
+> 
+> Осознанно не реализован: ранкинг(score захардкожен), автоисправление, персонализация, перестройка индекса в онлайне, антифрод, синонимы, учитывание контекста.
+> 
+> Это не production код, фокус на автодополнении через простые структуры данных и их сравнение.
+>
+> Проект сделан с использованием LLM. Выводы по производительности основаны на raw benchmark output в `reports/`.
 
 ## API
 
@@ -15,27 +28,11 @@ GET /api/engines
 
 | Engine | Роль |
 | --- | --- |
-| `linear` | correctness/performance baseline |
-| `sorted` | сильный простой baseline |
+| `linear` | correctness baseline: полный перебор |
+| `sorted` | сильный простой baseline: binary search по prefix range + top-k scan |
 | `radix` | mutable radix baseline на `github.com/armon/go-radix` |
 | `hashicorp-radix` | immutable radix baseline на `github.com/hashicorp/go-immutable-radix/v2` |
-| `ranked-trie` | самый быстрый read-heavy suggest engine в benchmark-е |
-
-`zyedidia-trie`, `dghubble-rune-trie` и `adaptive-radix` остаются в исследовательских benchmark-ах, но не показываются как основной suggest API path.
-
-## Dependency Policy
-
-Low-adoption trie/autocomplete зависимости удалены из проекта. В частности, `github.com/st1064870/generic` заменен на upstream `github.com/zyedidia/generic`, а `olympos.io/container/pruning-radix-trie` удален из `go.mod`.
-
-В benchmark-ах оставлены библиотеки с понятным adoption-сигналом:
-
-| Package | Почему оставлен |
-| --- | --- |
-| `github.com/zyedidia/generic` | upstream generic data structures, trie/TST implementation |
-| `github.com/dghubble/trie` | популярный trie для быстрых `Get`; benchmark показывает, почему его API плохо ложится на suggest |
-| `github.com/armon/go-radix` | популярный mutable radix baseline |
-| `github.com/hashicorp/go-immutable-radix/v2` | популярный immutable radix baseline |
-| `github.com/plar/go-adaptive-radix-tree/v2` | ART baseline с prefix iteration |
+| `ranked-trie` | custom top-k-aware trie: быстрый read-heavy query path за счёт cached top-k на prefix node |
 
 ## Запуск
 
@@ -54,28 +51,28 @@ http://localhost:8080
 
 Текущая модель проекта - build-on-start, read-only serving.
 
-Индексы строятся один раз при старте приложения, после этого HTTP handlers только вызывают `Suggest`. При таком инварианте выбранные engines безопасны для конкурентных read-only запросов:
+Индексы строятся один раз при старте приложения, после этого HTTP handlers только вызывают `Suggest`. Проект использует engines только в immutable/read-only режиме.
 
 | Component | Thread-safety модель |
 | --- | --- |
 | `Registry` | map заполняется при старте и дальше только читается |
 | `linear` / `sorted` | immutable slices после build |
-| `radix` (`go-radix`) | используется только для чтения после build; конкурентные mutation не поддерживаются |
-| `hashicorp-radix` | immutable tree, хорошо ложится на concurrent reads |
-| `ranked-trie` | custom trie не меняется после build; maps/slices только читаются |
+| `radix` (`go-radix`) | build happens before serving; after publication only read operations are used |
+| `hashicorp-radix` | immutable tree; естественно подходит для snapshot-style reads |
+| `ranked-trie` | custom trie публикуется после build и дальше не мутируется; maps/slices используются только для чтения |
 
-В проекте нет online updates и in-place rebuild. Если добавлять live reload индекса, новый индекс нужно строить отдельно и публиковать целиком через `atomic.Value`, `sync.RWMutex` или другой явный swap-механизм. Мутировать существующий trie/radix во время `Suggest` нельзя.
+В проекте нет online updates и in-place rebuild. Если добавлять live reload индекса, безопасная модель - copy-build-swap: новый индекс строится отдельно, затем публикуется целиком через `atomic.Value`, `sync.RWMutex` или другой явный snapshot swap. In-place mutation существующего trie/radix во время `Suggest` запрещена.
 
-## Benchmark-и
+## Benchmarks
 
-Smoke test:
+Быстрый smoke test для проверки, что benchmark-и запускаются локально:
 
 ```powershell
 $env:GOCACHE = "$PWD\.gocache"
 go test "./internal/suggest" -run "^$" -bench "BenchmarkSelectedSuggestEngines" -benchmem -benchtime=1s
 ```
 
-Benchstat-friendly запуск:
+Основной benchmark-прогон для отчёта:
 
 ```powershell
 $env:GOCACHE = "$PWD\.gocache"
@@ -86,13 +83,31 @@ go test "./internal/suggest" `
   -benchmem `
   -benchtime=3s `
   -count=10 `
-  > bench.txt
-
-benchstat bench.txt
+  *> reports\benchmarks-2026-04-26.txt
 ```
 
-Один прогон benchmark-а - это smoke test. Для уверенных выводов нужен `-count=10` и `benchstat`.
+Дополнительный прогон для `mixed` и `scale`:
+
+```powershell
+$env:GOCACHE = "$PWD\.gocache"
+
+go test "./internal/suggest" `
+  -run "^$" `
+  -bench "Benchmark(SuggestMixedTraffic|ScaleBuild|Scale)$" `
+  -benchmem `
+  -benchtime=3s `
+  -count=10 `
+  *> reports\benchmarks-scale-mixed-2026-04-26.txt
+```
+
+Dataset synthetic, поэтому результаты не стоит переносить напрямую на production traffic. Benchmark-и показывают относительное поведение структур данных на контролируемой нагрузке: broad/medium/narrow/missing prefixes, mixed traffic и scale tests.
+
+Один benchmark run используется только как smoke test. Таблицы в отчёте собраны по медиане из `-count=10`, чтобы уменьшить влияние шума планировщика, GC и фоновой нагрузки.
 
 Полный отчёт на русском: [reports/engine-benchmarks.md](reports/engine-benchmarks.md).
 
-Сырой вывод последнего smoke-прогона: [reports/benchmarks-2026-04-25.txt](reports/benchmarks-2026-04-25.txt).
+Сырой вывод:
+
+- [reports/benchmarks-2026-04-26.txt](reports/benchmarks-2026-04-26.txt)
+- [reports/benchmarks-scale-mixed-2026-04-26.txt](reports/benchmarks-scale-mixed-2026-04-26.txt)
+- [reports/retained-heap-2026-04-26.txt](reports/retained-heap-2026-04-26.txt)

@@ -1,94 +1,159 @@
-# Benchmark Report: Search Suggest Engines
+# Benchmark Report: In-memory Search Suggest Engines
+
+## Заметки автора
+
+> [!IMPORTANT]
+> Это учебно-исследовательский бенчмарк, а не серьёзное исследование для production системы.
+>
+> Цель сравнить базовые in-memory подходы к prefix suggest.
+>
+> Бенчмарки проведены с использованием LLM. Выводы основаны на raw benchmark output в `reports/`.
+
+## Glossary
+
+| Термин | Значение в этом отчёте |
+| --- | --- |
+| `search suggest` / `autocomplete` | Подсказки по мере ввода текста пользователем. В этом проекте рассматривается только prefix-based suggest. |
+| `prefix` | Начало строки, по которому ищутся подходящие suggestions. Например, для `go` candidates могут быть `golang`, `google`, `go tutorial`. |
+| `suggestion` | Один результат подсказки: текст + score. |
+| `candidate` | Строка из dataset, которая подходит под prefix и потенциально может попасть в top-k. |
+| `k` | Максимальное число suggestions, которое нужно вернуть. В benchmark-е используется `k=10`. |
+| `top-k` | Лучшие `k` suggestions по сортировке `score DESC`, затем `text ASC`. |
+| `bounded top-k retrieval` | Контракт запроса: вернуть не все candidates под prefix, а только ограниченный top-k. |
+| `score` | Числовой вес suggestion. В проекте score захардкожен и нужен только для демонстрации top-k mechanics. Качество ranking-а не измеряется. |
+| `ranking` | Продуктовая/ML-задача сортировки suggestions по полезности для пользователя. В этом проекте полноценный ranking не реализован. |
+| `tie-breaking` | Правило сортировки при одинаковом score. В benchmark-е используется `score DESC`, затем `text ASC`. |
+| `query path` | Код, который выполняется во время `Suggest(prefix, k)`. Для read-heavy suggest это самая важная часть. |
+| `build path` | Код построения индекса перед serving. Может быть дорогим, если это уменьшает query latency. |
+| `read-heavy workload` | Нагрузка, где запросов на чтение сильно больше, чем обновлений индекса. |
+| `linear scan` | Наивный baseline: пройти по всем строкам и проверить prefix. |
+| `sorted` | Baseline на отсортированном массиве строк: binary search находит prefix range, затем range сканируется для top-k. |
+| `trie` | Prefix tree: структура данных, где путь от root соответствует символам prefix. |
+| `radix tree` | Сжатый trie, где ребро может хранить не один символ, а строковый fragment. |
+| `ternary search trie` / `TST` | Trie-like структура, где каждый node хранит символ и три направления поиска: less/equal/greater. |
+| `adaptive radix tree` / `ART` | Radix tree, который меняет representation node в зависимости от числа children. |
+| `prefix traversal` / `prefix enumeration` | Поиск prefix node и обход всех descendants/candidates под ним. |
+| `subtree` | Часть дерева под найденным prefix node. На broad prefix subtree может быть большим. |
+| `cached top-k` | Предрассчитанный top-k suggestions, сохранённый прямо в node. Позволяет не обходить subtree во время query. |
+| `materialization` | Создание/сбор полного списка candidates или result slice во время query. |
+| `result ownership` | Контракт владения результатом: можно ли caller-у мутировать returned slice, или это read-only cached data. |
+| `synthetic dataset` | Искусственно сгенерированный dataset. Он полезен для контролируемого сравнения, но не заменяет real query logs. |
+| `workload` | Набор query cases, на которых измеряется engine: `broad`, `medium`, `narrow`, `missing`, `mixed`. |
+| `broad prefix` | Короткий prefix с большим числом candidates. |
+| `medium prefix` | Prefix со средним числом candidates, ближе к обычному пользовательскому вводу. |
+| `narrow prefix` | Selective prefix, где candidates мало. |
+| `missing prefix` | Prefix, которого нет в индексе. |
+| `ns/op` | Nanoseconds per operation: средняя стоимость одной benchmark operation. |
+| `B/op` | Bytes allocated per operation: allocation traffic за одну operation. |
+| `allocs/op` | Количество allocations per operation. |
+| `retained heap` | Память, которая остаётся занятой после build и GC. Отличается от `B/op`, который показывает allocation traffic. |
+| `benchstat` | Инструмент для статистического сравнения Go benchmark outputs. В отчёте используются медианы, но не полноценный benchstat-анализ. |
 
 ## Summary
 
-`ranked-trie` имеет самый быстрый query path в этом benchmark-е. Он хранит cached top-k рядом с каждым prefix node, поэтому `broad` и `medium` prefix queries почти не зависят от числа кандидатов под subtree.
+Benchmark сравнивает реализации search suggest на 100k synthetic phrases при `k=10`.
 
-`sorted` остается лучшим простым baseline: мало памяти, понятный build, сильное поведение на `narrow` и `missing`. На `broad` и `medium` latency растет вместе с размером prefix range.
+Главный результат: `ranked-trie` имеет самый быстрый query path на этом workload. Он хранит cached top-k suggestions рядом с prefix node, поэтому `broad` и `medium` prefix queries почти не зависят от числа кандидатов под subtree.
 
-`zyedidia-trie`, `dghubble-rune-trie`, `go-radix`, `hashicorp-radix` и `adaptive-radix` полезны как исследовательские prefix index baselines. Они показывают важную границу: generic trie/radix обычно оптимизирует prefix enumeration, а не bounded top-k suggest.
+Score в проекте захардкожен, поэтому benchmark проверяет механику bounded top-k retrieval under prefix. 
 
-`olympos.io/container/pruning-radix-trie` удален из проекта. По API он подходил под autocomplete, но dependency adoption слабый: пакет не в latest version своего module и на pkg.go.dev показывает `Imported by: 0`. Для pet project, который надо показывать на интервью, лучше не тащить такую зависимость в `go.mod`.
+`sorted` - самый сильный простой baseline в этом benchmark-е: мало retained memory, быстрый build и хорошее поведение на `narrow`/`missing`.
 
-Production-выбор зависит от read/write ratio, memory budget, build time и требований к latency. Самый быстрый query path не всегда означает лучший общий выбор.
+Обычный trie (`zyedidia-trie`) полезен как учебный и benchmark baseline после `sorted`, но для bounded top-k suggest он всё равно перечисляет кандидатов под prefix.
 
-## Environment
+Итоговый выбор зависит от tradeoff-а: query latency vs build time vs memory.
 
-| Field | Value |
+---
+
+## Окружение
+
+| Поле | Значение |
 | --- | --- |
-| Date | 2026-04-25 |
-| OS | Windows amd64 |
-| CPU | 11th Gen Intel(R) Core(TM) i5-11600K @ 3.90GHz |
+| Дата | 2026-04-26 |
+| OS | Windows |
+| CPU | Intel i5-11600K |
 | Go | 1.25.4 |
 | Dataset | 100k synthetic phrases |
 | k | 10 |
 
-Benchstat-friendly запуск:
+Основной benchmark-прогон:
 
 ```powershell
 $env:GOCACHE = "$PWD\.gocache"
-
 go test "./internal/suggest" `
   -run "^$" `
   -bench "Benchmark(TrieImplementations|RadixTrieImplementations|TopKImplementations|SelectedSuggestEngines)" `
   -benchmem `
   -benchtime=3s `
   -count=10 `
-  > bench.txt
-
-benchstat bench.txt
+  *> reports\benchmarks-2026-04-26.txt
 ```
 
-Один прогон benchmark-а - это smoke test. Для уверенных выводов нужен `-count=10`; `benchstat` показывает разброс и помогает не принимать шум за результат. Если разница между engines в десятки или сотни раз, общий вывод обычно устойчив даже без идеальной статистики, но `benchstat` все равно нужен для аккуратного отчета.
+Дополнительный прогон для `mixed` и `scale`:
+
+```powershell
+$env:GOCACHE = "$PWD\.gocache"
+go test "./internal/suggest" `
+  -run "^$" `
+  -bench "Benchmark(SuggestMixedTraffic|ScaleBuild|Scale)$" `
+  -benchmem `
+  -benchtime=3s `
+  -count=10 `
+  *> reports\benchmarks-scale-mixed-2026-04-26.txt
+```
+
+Retained heap diagnostic:
+
+```powershell
+$env:GOCACHE = "$PWD\.gocache"
+$env:SUGGEST_PRINT_RETAINED = "1"
+go test "./internal/suggest" -run "TestRetainedHeapComparison" -count=1 -v *> reports\retained-heap-2026-04-26.txt
+```
+
+Таблицы ниже используют медиану из 10 benchmark runs (`-count=10`). Retained heap - отдельный diagnostic test после build и GC, поэтому он не является `benchstat`-метрикой.
+
+---
 
 ## Workload
 
-| Case | Prefix examples | Meaning |
-| --- | --- | --- |
-| `broad` | `g`, `r`, `p`, `s` | короткий prefix, много кандидатов |
-| `medium` | `go`, `golang`, `docker`, `search`, `vector` | обычный пользовательский prefix |
-| `narrow` | `go tutorial 000000`, `docker docs 000052` | почти точечное совпадение |
-| `missing` | `zz`, `unknown` | prefix отсутствует |
-| `mixed` | fixed 10k prefix list | 20% broad, 60% medium, 10% narrow, 10% missing |
-
-`broad` показывает тяжелый случай. `narrow` и `missing` показывают selective path. `mixed` ближе к среднему пользовательскому трафику, но все еще synthetic.
-
-## Dependency Selection
-
-| Package | Adoption signal | Role |
-| --- | --- | --- |
-| `github.com/zyedidia/generic` | GitHub показывает 1.4k stars | upstream trie/TST baseline |
-| `github.com/dghubble/trie` | GitHub показывает 505 stars | popular trie baseline for `Get`; poor API fit for suggest |
-| `github.com/armon/go-radix` | GitHub показывает 936 stars и `Used by 21.8k` | mutable radix baseline |
-| `github.com/hashicorp/go-immutable-radix/v2` | GitHub показывает 1.1k stars | immutable radix baseline |
-| `github.com/plar/go-adaptive-radix-tree/v2` | GitHub показывает 414 stars | ART baseline |
-| custom `ranked-trie` | локальная реализация | top-k aware read-optimized engine |
-
-Удалено:
-
-| Package | Причина |
+| Case | Смысл |
 | --- | --- |
-| `github.com/st1064870/generic` | no-name fork; заменен на upstream `github.com/zyedidia/generic` |
-| `olympos.io/container/pruning-radix-trie` | weak adoption signal: pkg.go.dev показывает `Imported by: 0`; не держим в `go.mod` |
+| `broad` | короткий prefix, много кандидатов |
+| `medium` | обычный пользовательский prefix |
+| `narrow` | почти точное совпадение |
+| `missing` | prefix отсутствует |
+| `mixed` | 20% broad, 60% medium, 10% narrow, 10% missing |
+
+---
 
 ## Engines
 
-| Engine | Idea | Role |
+| Engine | Идея | Роль |
 | --- | --- | --- |
-| `linear` | full scan по всем фразам | correctness/performance baseline |
-| `sorted` | sorted strings + binary search range + bounded top-k accumulator | strong simple baseline |
-| `zyedidia-trie` | `github.com/zyedidia/generic/trie`, ternary search trie | ordinary trie/TST baseline |
-| `dghubble-rune-trie` | `github.com/dghubble/trie`, rune trie | popular trie baseline; not selected |
-| `go-radix` / `radix` | `github.com/armon/go-radix`, mutable radix tree | selected generic radix baseline |
-| `hashicorp-radix` | `github.com/hashicorp/go-immutable-radix/v2`, immutable radix tree | selected immutable radix baseline |
-| `adaptive-radix` | `github.com/plar/go-adaptive-radix-tree/v2` | ART research baseline; not selected |
-| `ranked-trie` | custom trie with cached top-k per node | fastest read-optimized engine in this benchmark |
+| `linear` | full scan | baseline для корректности и производительности |
+| `sorted` | sorted strings + binary search range + top-k accumulator | сильный простой baseline |
+| `zyedidia-trie` | ternary search trie | обычный trie baseline |
+| `dghubble-rune-trie` | rune trie | популярный trie baseline, слабый API fit для suggest |
+| `radix` / `go-radix` | mutable radix tree | generic radix baseline |
+| `hashicorp-radix` | immutable radix tree | immutable radix baseline |
+| `adaptive-radix` | adaptive radix tree | ART research baseline |
+| `ranked-trie` | custom trie с cached top-k в каждом node | самый быстрый read-optimized engine |
+
+---
 
 ## Fairness
 
-Все engines используют один synthetic dataset и одинаковые prefix sets. `k` одинаковый: `10`.
+Build и suggest benchmarks разделены. В suggest benchmark engine строится до `b.ResetTimer()`.
 
-Build benchmark и suggest benchmark разделены: build time не попадает в query latency. В query benchmark engine строится до `b.ResetTimer()`. Prefix list создается до `b.ResetTimer()`. В hot loop выполняется только `Suggest(prefix, k)` и запись результата в package-level sink:
+Все engines используют:
+
+- один dataset;
+- одинаковые prefix sets;
+- одинаковый `k=10`;
+- fixed seed для mixed workload;
+- package-level sink, чтобы компилятор не выбросил результат.
+
+Hot loop:
 
 ```go
 res := engine.Suggest(prefixes[i%len(prefixes)], k)
@@ -96,221 +161,210 @@ sinkSuggestions = res
 sinkInt += len(res)
 ```
 
-Mixed workload использует fixed seed и 10k заранее подготовленных prefix-ов. Данные не генерируются внутри hot loop.
+Корректность проверяется относительно `linear` на детерминированном dataset. Tie-breaking: `score DESC`, затем `text ASC`.
 
-Tie-breaking одинаковый для correctness-сравнения: выше `score`, затем лексикографически меньше `text`. `TestEnginesAgree` проверяет одинаковый top-k на тестовом наборе.
+Важное ограничение: allocation patterns не выравниваются искусственно. Они являются частью tradeoff-а конкретной реализации и её API.
 
-Ограничение fairness: allocation patterns являются частью реализации. Например, `zyedidia-trie` возвращает ключи через `KeysWithPrefix`, `dghubble-rune-trie` не дает эффективного prefix subtree API и adapter делает полный `Walk`, а `ranked-trie` возвращает cached top-k. Это не выравнивается искусственно, потому что именно API и поведение структуры влияют на пригодность для suggest.
+---
 
 ## Build Results
 
+Median of 10 samples, `benchtime=3s`.
+
 | Engine | ns/op | B/op | allocs/op |
 | --- | ---: | ---: | ---: |
-| `linear` | 11,261,162 | 10,302,616 | 259 |
-| `sorted` | 45,300,031 | 10,302,736 | 262 |
-| `zyedidia-trie` | 106,797,375 | 30,736,480 | 319,532 |
-| `dghubble-rune-trie` | 105,503,867 | 63,043,198 | 863,361 |
-| `go-radix` | 60,324,292 | 29,104,538 | 508,838 |
-| `hashicorp-radix` | 116,939,956 | 76,625,394 | 940,406 |
-| `adaptive-radix` | 70,672,800 | 29,101,120 | 571,446 |
-| `ranked-trie` | 170,845,417 | 86,100,912 | 1,243,726 |
+| `linear` | 9,257,214 | 10,302,746 | 259 |
+| `sorted` | 38,390,319 | 10,302,738 | 262 |
+| `zyedidia-trie` | 85,438,548 | 30,736,146 | 319,532 |
+| `dghubble-rune-trie` | 84,489,307 | 63,043,192 | 863,361 |
+| `radix` | 53,691,829 | 29,104,538 | 508,838 |
+| `hashicorp-radix` | 97,013,157 | 76,618,992 | 940,416 |
+| `adaptive-radix` | 59,347,471 | 29,101,118 | 571,446 |
+| `ranked-trie` | 136,495,641 | 86,100,870 | 1,243,726 |
 
-`linear` почти бесплатен на build: он только нормализует и хранит данные. `sorted` дороже из-за сортировки, но остается дешевым по памяти. `ranked-trie` самый дорогой на build, потому что кладет top-k cache во многие узлы. Build time не равен query time: `ranked-trie` платит заранее, чтобы ускорить чтение.
+Коротко:
 
-`hashicorp-radix` строится заметно дороже `go-radix`: immutable структура и transaction path дают цену по allocation traffic. Это нормально для immutable radix, но для batch-built read-only suggest индекса такой build cost надо учитывать отдельно.
+- `linear` дешевле всего строится;
+- `sorted` платит за сортировку, но остаётся экономным по памяти;
+- `radix` строится быстрее и дешевле, чем `hashicorp-radix`;
+- `ranked-trie` дороже всего строится, потому что заранее считает top-k cache.
+
+---
 
 ## Suggest Results
+
+Median of 10 samples, `benchtime=3s`.
 
 ### Broad
 
 | Engine | ns/op | B/op | allocs/op |
 | --- | ---: | ---: | ---: |
-| `linear` | 1,050,870 | 480 | 2 |
-| `sorted` | 413,637 | 480 | 2 |
-| `zyedidia-trie` | 6,798,259 | 1,766,943 | 17,252 |
-| `dghubble-rune-trie` | 45,817,756 | 7,935,786 | 319,274 |
-| `go-radix` | 2,266,603 | 480 | 2 |
-| `hashicorp-radix` | 2,097,447 | 856 | 7 |
-| `adaptive-radix` | 16,493,563 | 998,233 | 53,453 |
-| `ranked-trie` | 108.6 | 240 | 1 |
+| `linear` | 789,293 | 480 | 2 |
+| `sorted` | 245,392 | 480 | 2 |
+| `zyedidia-trie` | 5,876,984 | 1,763,522 | 17,222 |
+| `dghubble-rune-trie` | 40,275,144 | 7,935,783 | 319,274 |
+| `radix` | 1,873,149 | 480 | 2 |
+| `hashicorp-radix` | 1,662,804 | 856 | 7 |
+| `adaptive-radix` | 14,200,517 | 998,232 | 53,453 |
+| `ranked-trie` | 94.6 | 240 | 1 |
 
-`broad` показывает главный тезис проекта. Обычные trie/radix проходят много кандидатов под prefix. `ranked-trie` не материализует subtree и возвращает cached top-k, поэтому разница становится не микрооптимизацией, а другим классом query path.
+На broad prefix обычные trie/radix обходят много кандидатов. `ranked-trie` возвращает cached top-k и не материализует subtree.
 
 ### Medium
 
 | Engine | ns/op | B/op | allocs/op |
 | --- | ---: | ---: | ---: |
-| `linear` | 851,015 | 480 | 2 |
-| `sorted` | 154,354 | 480 | 2 |
-| `zyedidia-trie` | 2,771,944 | 644,051 | 7,521 |
-| `dghubble-rune-trie` | 46,655,563 | 7,935,784 | 319,274 |
-| `go-radix` | 975,791 | 480 | 2 |
-| `hashicorp-radix` | 875,971 | 856 | 7 |
-| `adaptive-radix` | 15,192,246 | 998,232 | 53,453 |
-| `ranked-trie` | 126.9 | 240 | 1 |
+| `linear` | 558,487 | 480 | 2 |
+| `sorted` | 101,534 | 480 | 2 |
+| `zyedidia-trie` | 2,374,201 | 643,864 | 7,520 |
+| `dghubble-rune-trie` | 41,146,329 | 7,935,783 | 319,274 |
+| `radix` | 661,046 | 480 | 2 |
+| `hashicorp-radix` | 598,050 | 856 | 7 |
+| `adaptive-radix` | 12,459,941 | 998,232 | 53,453 |
+| `ranked-trie` | 117.05 | 240 | 1 |
 
-На обычном пользовательском prefix `sorted` уже сильно лучше linear, но все еще зависит от размера range. Generic trie/radix тоже обходят subtree. `ranked-trie` работает как bounded top-k suggest engine, а не как prefix enumeration engine.
+На обычном пользовательском prefix `sorted` - сильный простой baseline. `ranked-trie` всё равно на порядки быстрее, потому что query cost ограничен lookup-ом prefix и возвратом cached top-k.
 
 ### Narrow
 
 | Engine | ns/op | B/op | allocs/op |
 | --- | ---: | ---: | ---: |
-| `linear` | 557,129 | 264 | 2 |
-| `sorted` | 186.8 | 264 | 2 |
-| `zyedidia-trie` | 335.8 | 280 | 3 |
-| `dghubble-rune-trie` | 43,824,756 | 7,935,567 | 319,274 |
-| `go-radix` | 173.6 | 264 | 2 |
-| `hashicorp-radix` | 228.1 | 304 | 4 |
-| `adaptive-radix` | 14,273,179 | 998,032 | 53,453 |
-| `ranked-trie` | 162.9 | 24 | 1 |
+| `linear` | 383,106 | 264 | 2 |
+| `sorted` | 164.2 | 264 | 2 |
+| `zyedidia-trie` | 313.85 | 280 | 3 |
+| `dghubble-rune-trie` | 39,383,230 | 7,935,568 | 319,274 |
+| `radix` | 161.15 | 264 | 2 |
+| `hashicorp-radix` | 206.3 | 304 | 4 |
+| `adaptive-radix` | 11,350,978 | 998,032 | 53,453 |
+| `ranked-trie` | 155 | 24 | 1 |
 
-На почти точечном совпадении `sorted`, `go-radix` и `ranked-trie` близки. Это важный tradeoff: если workload почти всегда selective, простой `sorted` может быть достаточно хорош.
+На selective prefix `sorted`, `radix` и `ranked-trie` близки. Если workload в основном selective, простой `sorted` может быть достаточно хорош.
 
 ### Missing
 
 | Engine | ns/op | B/op | allocs/op |
 | --- | ---: | ---: | ---: |
-| `linear` | 582,861 | 240 | 1 |
-| `sorted` | 132.3 | 240 | 1 |
-| `zyedidia-trie` | 80.65 | 240 | 1 |
-| `dghubble-rune-trie` | 44,453,040 | 7,935,541 | 319,273 |
-| `go-radix` | 87.73 | 240 | 1 |
-| `hashicorp-radix` | 82.21 | 240 | 1 |
-| `adaptive-radix` | 15,071,630 | 997,992 | 53,452 |
-| `ranked-trie` | 14.52 | 0 | 0 |
+| `linear` | 373,707 | 240 | 1 |
+| `sorted` | 119.45 | 240 | 1 |
+| `zyedidia-trie` | 69.48 | 240 | 1 |
+| `dghubble-rune-trie` | 40,021,579 | 7,935,544 | 319,273 |
+| `radix` | 71.33 | 240 | 1 |
+| `hashicorp-radix` | 72.14 | 240 | 1 |
+| `adaptive-radix` | 11,741,697 | 997,993 | 53,452 |
+| `ranked-trie` | 13.43 | 0 | 0 |
 
-На отсутствующем prefix дерево может выйти рано, поэтому `zyedidia-trie`, `go-radix` и `hashicorp-radix` выглядят хорошо. `ranked-trie` все равно быстрее за счет короткого lookup path и отсутствия аллокаций.
+Missing prefix дешёв для деревьев: lookup быстро выходит. `ranked-trie` остаётся самым быстрым и без аллокаций.
 
 ### Mixed Traffic
 
 | Engine | ns/op | B/op | allocs/op |
 | --- | ---: | ---: | ---: |
-| `linear` | 659,351 | 432 | 1 |
-| `sorted` | 130,664 | 434 | 1 |
-| `go-radix` | 917,878 | 433 | 1 |
-| `hashicorp-radix` | 893,461 | 736 | 6 |
-| `ranked-trie` | 121.8 | 194 | 0 |
+| `linear` | 529,503 | 433 | 1 |
+| `sorted` | 103,649 | 434 | 1 |
+| `radix` | 634,086 | 433 | 1 |
+| `hashicorp-radix` | 638,328 | 734 | 6 |
+| `ranked-trie` | 114.05 | 194 | 0 |
 
-Mixed workload показывает усредненную картину: `sorted` остается сильным baseline, `go-radix` и `hashicorp-radix` проигрывают на broad/medium части трафика, а `ranked-trie` почти не реагирует на размер prefix range.
+Mixed traffic показывает практическую картину: `sorted` - лучший простой baseline, generic radix страдает на broad/medium части трафика, `ranked-trie` почти не зависит от размера prefix range.
 
-## Trie Implementations
-
-| Engine | Broad ns/op | Medium ns/op | Narrow ns/op | Missing ns/op | Вывод |
-| --- | ---: | ---: | ---: | ---: | --- |
-| `zyedidia-trie` | 6,798,259 | 2,771,944 | 335.8 | 80.65 | нормальный ordinary trie/TST baseline; broad/medium дорогие из-за materialized keys |
-| `dghubble-rune-trie` | 45,817,756 | 46,655,563 | 43,824,756 | 44,453,040 | не подходит для suggest adapter: нет эффективного prefix subtree API, приходится делать full walk |
-
-`dghubble/trie` не плохая библиотека. Ее README прямо позиционирует use case вокруг быстрых `Get` после upfront `Put`. Для suggest нужен другой contract: bounded top-k под prefix. Поэтому она остается в исследовательской группе, но не выбирается для API.
-
-## Radix Implementations
-
-| Engine | Broad ns/op | Medium ns/op | Narrow ns/op | Missing ns/op | Вывод |
-| --- | ---: | ---: | ---: | ---: | --- |
-| `go-radix` | 2,266,603 | 975,791 | 173.6 | 87.73 | лучший mutable generic radix baseline |
-| `hashicorp-radix` | 2,097,447 | 875,971 | 228.1 | 82.21 | похожая query latency, дороже build/memory из-за immutable design |
-| `adaptive-radix` | 16,493,563 | 15,192,246 | 14,273,179 | 15,071,630 | observed behavior в этом adapter не подходит для suggest workload |
-
-`go-radix` и `hashicorp-radix` близки по query на broad/medium. `hashicorp-radix` чуть быстрее на этих smoke числах, но платит заметно большим build allocation traffic и retained heap.
-
-`adaptive-radix` формулирую аккуратно: в этой версии и с этим adapter latency и allocations почти не зависят от selectivity prefix. Это не оценка библиотеки в целом, а вывод для данного query contract.
-
-## Top-K Implementations
-
-| Engine | Broad ns/op | Medium ns/op | Narrow ns/op | Missing ns/op | Вывод |
-| --- | ---: | ---: | ---: | ---: | --- |
-| `sorted-range-topk` | 473,346 | 150,955 | 185.5 | 130.5 | сильный простой baseline |
-| `ranked-trie` | 104.0 | 130.3 | 161.9 | 14.99 | самый быстрый query path в этом benchmark-е |
-
-В Go-наборе зависимостей после фильтра по adoption не осталось library top-k autocomplete engine, который я бы оставил в `go.mod`. Поэтому top-k comparison теперь честнее: простой `sorted-range-topk` против custom `ranked-trie`.
+---
 
 ## Retained Memory
 
-Команда:
+`B/op` в build benchmark показывает allocation traffic. Retained heap показывает, сколько памяти остаётся после build и GC.
 
-```powershell
-$env:GOCACHE = "$PWD\.gocache"
-$env:SUGGEST_PRINT_RETAINED = "1"
-go test "./internal/suggest" -run "TestRetainedHeapComparison" -count=1 -v
-```
+Diagnostic run: `reports/retained-heap-2026-04-26.txt`.
 
 Для 100k фраз:
 
 | Engine | Retained heap | Bytes per phrase |
 | --- | ---: | ---: |
-| `sorted` | 8,984,160 | 89.84 |
-| `go-radix` | 18,740,688 | 187.41 |
-| `hashicorp-radix` | 48,887,112 | 488.87 |
+| `sorted` | 8,984,176 | 89.84 |
+| `radix` | 18,735,552 | 187.36 |
+| `hashicorp-radix` | 48,890,928 | 488.91 |
 | `ranked-trie` | 76,656,624 | 766.57 |
 
-`B/op` в build benchmark показывает allocation traffic: сколько байт было выделено за операцию построения. Retained heap показывает другое: сколько памяти осталось жить после построения индекса и GC. Для capacity planning retained heap важнее, чем только `B/op`.
+Коротко:
 
-`sorted` самый экономный. `go-radix` примерно в два раза дороже `sorted`. `hashicorp-radix` заметно дороже `go-radix`. `ranked-trie` самый дорогой: он покупает минимальную query latency за счет памяти.
+- `sorted` самый экономный;
+- `radix` примерно в 2 раза дороже `sorted`;
+- `hashicorp-radix` заметно тяжелее из-за immutable overhead;
+- `ranked-trie` самый дорогой: он покупает query latency памятью.
+
+---
 
 ## Scale Results
 
-`BenchmarkScale` по умолчанию запускает 10k и 100k. 1M включается явно:
-
-```powershell
-$env:SUGGEST_BENCH_1M = "1"
-```
+Benchmark values are medians of 10 samples. Retained memory is from the retained heap diagnostic run.
 
 | Dataset size | Engine | broad ns/op | medium ns/op | build ns/op | retained memory |
 | ---: | --- | ---: | ---: | ---: | ---: |
-| 10,000 | `sorted` | 23,383 | 10,653 | 3,546,612 | 871,296 |
-| 10,000 | `go-radix` | 52,704 | 21,418 | 4,630,619 | 1,903,520 |
-| 10,000 | `hashicorp-radix` | 49,318 | 21,329 | 7,249,685 | 4,862,800 |
-| 10,000 | `ranked-trie` | 104.0 | 134.5 | 13,612,255 | 8,606,288 |
-| 100,000 | `sorted` | 315,840 | 120,789 | 43,989,064 | 8,984,160 |
-| 100,000 | `go-radix` | 2,502,490 | 999,270 | 62,886,615 | 18,740,688 |
-| 100,000 | `hashicorp-radix` | 2,024,497 | 862,246 | 118,359,867 | 48,887,112 |
-| 100,000 | `ranked-trie` | 103.3 | 127.2 | 170,055,729 | 76,656,624 |
-| 1,000,000 | `sorted` | TODO | TODO | TODO | TODO |
-| 1,000,000 | `go-radix` | TODO | TODO | TODO | TODO |
-| 1,000,000 | `hashicorp-radix` | TODO | TODO | TODO | TODO |
-| 1,000,000 | `ranked-trie` | TODO | TODO | TODO | TODO |
+| 10,000 | `sorted` | 21,100 | 10,099 | 3,354,300 | 866,304 |
+| 10,000 | `radix` | 47,086 | 19,793 | 4,122,562 | 1,893,408 |
+| 10,000 | `hashicorp-radix` | 44,942 | 18,976 | 6,506,407 | 4,878,024 |
+| 10,000 | `ranked-trie` | 93.86 | 114.9 | 12,212,201 | 8,606,272 |
+| 100,000 | `sorted` | 262,777 | 94,810 | 37,043,186 | 8,984,176 |
+| 100,000 | `radix` | 1,865,869 | 758,119 | 50,900,325 | 18,735,552 |
+| 100,000 | `hashicorp-radix` | 1,806,559 | 686,643 | 96,719,544 | 48,890,928 |
+| 100,000 | `ranked-trie` | 99.48 | 120.75 | 137,527,725 | 76,656,624 |
 
-Scale показывает форму роста. `sorted` растет вместе с размером prefix range. `go-radix` и `hashicorp-radix` тоже обходят subtree, поэтому на broad prefix растут заметно. `ranked-trie` почти не зависит от числа кандидатов в broad/medium, потому что использует top-k cache. Цена `ranked-trie` видна в build time и retained memory.
+Коротко:
+
+- `sorted` растёт вместе с prefix range;
+- `radix` и `hashicorp-radix` тоже растут, потому что обходят subtree;
+- `ranked-trie` почти не меняется на broad/medium query latency;
+- цена `ranked-trie` видна в build time и retained memory.
+
+---
 
 ## Analysis
 
-`linear` - хороший correctness/performance baseline. Build почти бесплатный, query `O(N)`, масштабируется плохо. Он нужен для сравнения, но не как реальный suggest engine.
+`linear` нужен только как baseline. Build дешёвый, query - `O(N)`.
 
-`sorted` - сильный простой baseline. Build дороже linear из-за сортировки. Query хорош на `narrow` и `missing`, а `broad`/`medium` зависят от размера prefix range. Памяти нужно мало. Это хороший кандидат, если нужна простота и приемлемая latency.
+`sorted` - самая сильная простая реализация. Она экономна по памяти и очень быстра на selective prefix. Слабое место - broad/medium prefix, где приходится сканировать matching range.
 
-`zyedidia-trie` быстро выходит к prefix node, но затем материализует ключи под subtree. Поэтому `broad` и `medium` дорогие. Обычный trie решает prefix enumeration, а не top-k suggest.
+`zyedidia-trie` полезен как обычный trie baseline после `sorted`, но он перечисляет ключи под prefix и потом добирает top-k. Для broad top-k suggest это не тот query contract.
 
-`dghubble-rune-trie` оптимизирован под быстрые `Get`, но не под autocomplete suggest. В этом adapter он делает полный `Walk` и фильтрацию по prefix, поэтому latency почти не зависит от selectivity и остается высокой.
+`dghubble-rune-trie` не выбран: adapter вынужден делать full walk для suggest-like queries.
 
-`go-radix` - лучший generic mutable radix baseline из проверенных. Он сжимает prefix structure и обычно лучше plain trie, но без top-k cache все равно обходит subtree для broad prefix.
+`radix` / `go-radix` полезен как mutable radix baseline, но тоже перечисляет subtree.
 
-`hashicorp-radix` - сильный immutable radix baseline. Query похож на `go-radix`, иногда немного быстрее на broad/medium в smoke run, но build и retained memory заметно дороже. Его сильная сторона - immutable snapshot semantics, а не минимальный memory footprint для этого pet project.
+`hashicorp-radix` даёт immutable snapshot semantics, но в этом benchmark-е стоит дороже по build allocation traffic и retained memory.
 
-`adaptive-radix` по измерениям в этой версии и с этим adapter не подходит для suggest workload. Наблюдаемое поведение: latency и allocations почти не зависят от selectivity prefix. Формулировка важна: это observed behavior in this benchmark, а не "библиотека плохая".
+`adaptive-radix` не выбран для этого workload. В этом adapter latency и allocations высокие и почти не зависят от selectivity prefix.
 
-`ranked-trie` имеет самый быстрый query path в этом benchmark-е. Cached top-k в каждом node меняет класс сложности query: `broad` и `medium` почти не зависят от числа кандидатов. Цена - build time, retained memory и большое количество allocation during build. Это лучший вариант для read-heavy in-memory suggest, если индекс можно перестраивать batch/offline.
+`ranked-trie` - самый быстрый read-optimized engine. Он заранее считает top-k в узлах, поэтому query не обходит subtree. Цена - build time и retained memory.
+
+---
 
 ## Final Decision
 
-| Use case | Recommended engine | Why |
+| Use case | Engine | Причина |
 | --- | --- | --- |
-| correctness baseline | `linear` | проще всего проверить корректность |
-| simple baseline | `sorted` | мало памяти, понятная реализация, сильные narrow/missing |
-| generic prefix tree baseline | `go-radix` | лучший mutable radix baseline из проверенных |
-| immutable radix baseline | `hashicorp-radix` | полезен как проверенный immutable вариант, но дороже по памяти/build |
-| fastest read-heavy suggest | `ranked-trie` | минимальная query latency при высокой цене памяти/build |
+| correctness baseline | `linear` | самая простая reference-реализация |
+| simple production-like baseline | `sorted` | мало памяти, простота, сильный selective-prefix performance |
+| trie research baseline | `zyedidia-trie` | нужен в benchmark-е для честной линейки `sorted -> trie -> radix` |
+| generic mutable radix baseline | `radix` | лучший generic radix вариант из проверенных |
+| immutable radix baseline | `hashicorp-radix` | полезен для snapshot semantics, но тяжелее |
+| fastest read-heavy suggest | `ranked-trie` | минимальная query latency, максимальная цена по memory/build |
+
+В HTTP API сейчас оставлены только selected engines. Обычные trie baselines остаются в benchmark/test коде, чтобы API не раздувался исследовательскими вариантами.
+
+---
 
 ## Limitations
 
 - Synthetic dataset.
 - Local machine benchmark.
-- Один smoke-прогон в таблицах; для финального отчета нужен `-count=10` и `benchstat`.
 - Нет real query logs.
 - Нет personalization.
 - Нет typo correction.
 - Нет ML ranking.
 - Нет distributed serving.
 - Нет benchmark-а online incremental updates.
-- Dependency popularity не является security proof; это только pragmatic supply-chain filter.
+- Retained heap измеряется отдельным diagnostic test, а не `testing.B`.
+
+---
 
 ## Main Conclusion
 
@@ -318,4 +372,4 @@ Scale показывает форму роста. `sorted` растет вмес
 
 Для search suggest контракт - bounded top-k retrieval under a prefix. Generic trie/radix структуры оптимизируют prefix enumeration. Top-k aware структуры оптимизируют фактический suggest workload.
 
-Поэтому `ranked-trie` доминирует на `broad` и `medium` prefix queries, а `sorted` остается сильным простым baseline. Generic trie/radix остаются полезными baseline-ами, но без top-k awareness они решают не тот query contract.
+Поэтому `ranked-trie` доминирует на broad и medium prefix queries, а `sorted` остаётся самым сильным простым baseline.

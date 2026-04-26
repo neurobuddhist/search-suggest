@@ -5,15 +5,21 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"autocomplete/internal/suggest"
 )
 
 type Handler struct {
-	registry *suggest.Registry
+	registry EngineRegistry
 }
 
-func New(registry *suggest.Registry) *Handler {
+type EngineRegistry interface {
+	Get(name string) (suggest.Engine, bool)
+	Names() []string
+}
+
+func New(registry EngineRegistry) *Handler {
 	return &Handler{registry: registry}
 }
 
@@ -67,13 +73,14 @@ func (h *Handler) handleSuggest(w http.ResponseWriter, r *http.Request) {
 }
 
 func parseK(raw string) (int, error) {
+	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return 8, nil
 	}
 
 	k, err := strconv.Atoi(raw)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("k must be an integer")
 	}
 	if k < 1 {
 		return 0, fmt.Errorf("k must be positive")
@@ -93,6 +100,7 @@ type suggestResponse struct {
 
 func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
 }

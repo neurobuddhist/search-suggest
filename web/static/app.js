@@ -7,10 +7,17 @@ const empty = document.querySelector("#empty");
 
 let abortController;
 let debounceTimer;
+let requestID = 0;
 
 async function loadEngines() {
   const response = await fetch("/api/engines");
+  if (!response.ok) {
+    throw new Error("failed to load engines");
+  }
   const data = await response.json();
+  if (!Array.isArray(data.engines)) {
+    throw new Error("invalid engine response");
+  }
 
   engineSelect.replaceChildren(
     ...data.engines.map((engine) => {
@@ -32,6 +39,7 @@ function scheduleSuggest() {
 
 async function fetchSuggestions() {
   abortController?.abort();
+  const currentRequestID = ++requestID;
   abortController = new AbortController();
 
   const params = new URLSearchParams({
@@ -45,20 +53,24 @@ async function fetchSuggestions() {
       signal: abortController.signal,
     });
     const data = await response.json();
+    if (currentRequestID !== requestID) {
+      return;
+    }
     if (!response.ok) {
       throw new Error(data.error || "request failed");
     }
     render(data);
   } catch (error) {
-    if (error.name !== "AbortError") {
+    if (error.name !== "AbortError" && currentRequestID === requestID) {
       render({ suggestions: [] });
     }
   }
 }
 
 function render(data) {
+  const suggestions = Array.isArray(data.suggestions) ? data.suggestions : [];
   results.replaceChildren(
-    ...data.suggestions.map((item) => {
+    ...suggestions.map((item) => {
       const row = document.createElement("li");
 
       const phrase = document.createElement("span");
@@ -73,7 +85,7 @@ function render(data) {
       return row;
     }),
   );
-  empty.hidden = data.suggestions.length > 0;
+  empty.hidden = suggestions.length > 0;
 }
 
 kInput.addEventListener("input", () => {

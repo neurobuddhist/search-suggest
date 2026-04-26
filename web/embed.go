@@ -8,10 +8,6 @@ import (
 //go:embed static/*
 var staticFiles embed.FS
 
-func Files() fs.FS {
-	files, err := fs.Sub(staticFiles, "static")
-	if err != nil {
-		panic(err)
-	}
-	return files
+func Files() (fs.FS, error) {
+	return fs.Sub(staticFiles, "static")
 }
