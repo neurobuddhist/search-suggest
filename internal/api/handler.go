@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"autocomplete/internal/suggest"
+	"github.com/neurobuddhist/search-suggest/internal/suggest"
 )
 
 type Handler struct {

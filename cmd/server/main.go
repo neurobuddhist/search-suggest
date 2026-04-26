@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"autocomplete/internal/api"
-	"autocomplete/internal/corpus"
-	"autocomplete/internal/suggest"
-	"autocomplete/web"
+	"github.com/neurobuddhist/search-suggest/internal/api"
+	"github.com/neurobuddhist/search-suggest/internal/corpus"
+	"github.com/neurobuddhist/search-suggest/internal/suggest"
+	"github.com/neurobuddhist/search-suggest/web"
 )
 
 func main() {

@@ -16,14 +16,13 @@ GET /api/suggest?text=go&engine=ranked-trie&k=8
 GET /api/engines
 ```
 
-В API оставлены только выбранные engines:
+В демо-интерфейсе оставлены только выбранные engines:
 
 | Engine | Роль |
 | --- | --- |
 | `linear` | correctness baseline: полный перебор |
 | `sorted` | сильный простой baseline: binary search по prefix range + top-k scan |
 | `radix` | mutable radix baseline на `github.com/armon/go-radix` |
-| `hashicorp-radix` | immutable radix baseline на `github.com/hashicorp/go-immutable-radix/v2` |
 | `ranked-trie` | custom top-k-aware trie: быстрый read-heavy query path за счёт cached top-k на prefix node |
 
 ## Запуск
@@ -50,7 +49,6 @@ http://localhost:8080
 | `Registry` | map заполняется при старте и дальше только читается |
 | `linear` / `sorted` | immutable slices после build |
 | `radix` (`go-radix`) | build happens before serving; after publication only read operations are used |
-| `hashicorp-radix` | immutable tree; естественно подходит для snapshot-style reads |
 | `ranked-trie` | custom trie публикуется после build и дальше не мутируется; maps/slices используются только для чтения |
 
 В проекте нет online updates и in-place rebuild. Если добавлять live reload индекса, безопасная модель - copy-build-swap: новый индекс строится отдельно, затем публикуется целиком через `atomic.Value`, `sync.RWMutex` или другой явный snapshot swap. In-place mutation существующего trie/radix во время `Suggest` запрещена.

@@ -4,6 +4,7 @@ const kInput = document.querySelector("#k");
 const kValue = document.querySelector("#k-value");
 const results = document.querySelector("#results");
 const empty = document.querySelector("#empty");
+const visibleEngines = new Set(["linear", "sorted", "radix", "ranked-trie"]);
 
 let abortController;
 let debounceTimer;
@@ -19,8 +20,10 @@ async function loadEngines() {
     throw new Error("invalid engine response");
   }
 
+  const engines = data.engines.filter((engine) => visibleEngines.has(engine));
+
   engineSelect.replaceChildren(
-    ...data.engines.map((engine) => {
+    ...engines.map((engine) => {
       const option = document.createElement("option");
       option.value = engine;
       option.textContent = engine;

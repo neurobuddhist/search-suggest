@@ -1,9 +1,12 @@
 package corpus
 
-import "autocomplete/internal/suggest"
+import "github.com/neurobuddhist/search-suggest/internal/suggest"
 
 func Items() []suggest.Item {
 	items := []suggest.Item{
+		{Text: "avito", Score: 1500},
+		{Text: "avito career", Score: 1450},
+		{Text: "avito search team", Score: 1400},
 		{Text: "go autocomplete", Score: 1200},
 		{Text: "go benchmark", Score: 1120},
 		{Text: "go context", Score: 1080},

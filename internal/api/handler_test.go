@@ -6,7 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"autocomplete/internal/suggest"
+	"github.com/neurobuddhist/search-suggest/internal/suggest"
 )
 
 func TestParseK(t *testing.T) {
