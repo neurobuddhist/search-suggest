@@ -2,7 +2,7 @@
 
 Учебно-исследовательский проект про autocomplete/search suggest: сравнение простых in-memory подходов и trie с cached top-k suggestions на Go.
 
-## Заметки автора.
+## Заметки автора
 
 > [!NOTE]
 > Проект сделан как исследование Backend + IR: как базовые структуры данных ведут себя в задаче autocomplete/search suggest.
