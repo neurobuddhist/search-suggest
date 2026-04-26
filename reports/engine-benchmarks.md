@@ -9,6 +9,22 @@
 >
 > Бенчмарки проведены с использованием LLM. Выводы основаны на raw benchmark output в `reports/`.
 
+## Summary
+
+Benchmark сравнивает реализации search suggest на 100k synthetic phrases при `k=10`.
+
+Главный результат: `ranked-trie` имеет самый быстрый query path на этом workload. Он хранит cached top-k suggestions рядом с prefix node, поэтому `broad` и `medium` prefix queries почти не зависят от числа кандидатов под subtree.
+
+Score в проекте захардкожен, поэтому benchmark проверяет механику bounded top-k retrieval under prefix. 
+
+`sorted` - самый сильный простой baseline в этом benchmark-е: мало retained memory, быстрый build и хорошее поведение на `narrow`/`missing`.
+
+Обычный trie (`zyedidia-trie`) полезен как учебный и benchmark baseline после `sorted`, но для bounded top-k suggest он всё равно перечисляет кандидатов под prefix.
+
+Итоговый выбор зависит от tradeoff-а: query latency vs build time vs memory.
+
+---
+
 ## Glossary
 
 | Термин | Значение в этом отчёте |
@@ -48,20 +64,6 @@
 | `allocs/op` | Количество allocations per operation. |
 | `retained heap` | Память, которая остаётся занятой после build и GC. Отличается от `B/op`, который показывает allocation traffic. |
 | `benchstat` | Инструмент для статистического сравнения Go benchmark outputs. В отчёте используются медианы, но не полноценный benchstat-анализ. |
-
-## Summary
-
-Benchmark сравнивает реализации search suggest на 100k synthetic phrases при `k=10`.
-
-Главный результат: `ranked-trie` имеет самый быстрый query path на этом workload. Он хранит cached top-k suggestions рядом с prefix node, поэтому `broad` и `medium` prefix queries почти не зависят от числа кандидатов под subtree.
-
-Score в проекте захардкожен, поэтому benchmark проверяет механику bounded top-k retrieval under prefix. 
-
-`sorted` - самый сильный простой baseline в этом benchmark-е: мало retained memory, быстрый build и хорошее поведение на `narrow`/`missing`.
-
-Обычный trie (`zyedidia-trie`) полезен как учебный и benchmark baseline после `sorted`, но для bounded top-k suggest он всё равно перечисляет кандидатов под prefix.
-
-Итоговый выбор зависит от tradeoff-а: query latency vs build time vs memory.
 
 ---
 
@@ -133,7 +135,7 @@ go test "./internal/suggest" -run "TestRetainedHeapComparison" -count=1 -v *> re
 | `linear` | full scan | baseline для корректности и производительности |
 | `sorted` | sorted strings + binary search range + top-k accumulator | сильный простой baseline |
 | `zyedidia-trie` | ternary search trie | обычный trie baseline |
-| `dghubble-rune-trie` | rune trie | популярный trie baseline, слабый API fit для suggest |
+| `dghubble-rune-trie` | rune trie | trie baseline, слабый API fit для suggest |
 | `radix` / `go-radix` | mutable radix tree | generic radix baseline |
 | `hashicorp-radix` | immutable radix tree | immutable radix baseline |
 | `adaptive-radix` | adaptive radix tree | ART research baseline |
@@ -295,7 +297,7 @@ Diagnostic run: `reports/retained-heap-2026-04-26.txt`.
 
 ## Scale Results
 
-Benchmark values are medians of 10 samples. Retained memory is from the retained heap diagnostic run.
+Значения бенчмарков приведены как медианы по 10 запускам. Retained memory измерена отдельным diagnostic run для retained heap.
 
 | Dataset size | Engine | broad ns/op | medium ns/op | build ns/op | retained memory |
 | ---: | --- | ---: | ---: | ---: | ---: |
