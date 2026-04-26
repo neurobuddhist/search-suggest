@@ -1,4 +1,4 @@
-module autocomplete
+module github.com/neurobuddhist/search-suggest
 
 go 1.25.4
 
