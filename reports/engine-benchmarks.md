@@ -1,14 +1,5 @@
 # Benchmark Report: In-memory Search Suggest Engines
 
-## Заметки автора
-
-> [!IMPORTANT]
-> Это учебно-исследовательский бенчмарк, а не серьёзное исследование для production системы.
->
-> Цель сравнить базовые in-memory подходы к prefix suggest.
->
-> Бенчмарки проведены с использованием LLM. Выводы основаны на raw benchmark output в `reports/`.
-
 ## Summary
 
 Benchmark сравнивает реализации search suggest на 100k synthetic phrases при `k=10`.
@@ -351,20 +342,6 @@ Diagnostic run: `reports/retained-heap-2026-04-26.txt`.
 | fastest read-heavy suggest | `ranked-trie` | минимальная query latency, максимальная цена по memory/build |
 
 В HTTP API сейчас оставлены только selected engines. Обычные trie baselines остаются в benchmark/test коде, чтобы API не раздувался исследовательскими вариантами.
-
----
-
-## Limitations
-
-- Synthetic dataset.
-- Local machine benchmark.
-- Нет real query logs.
-- Нет personalization.
-- Нет typo correction.
-- Нет ML ranking.
-- Нет distributed serving.
-- Нет benchmark-а online incremental updates.
-- Retained heap измеряется отдельным diagnostic test, а не `testing.B`.
 
 ---
 
